@@ -44,6 +44,15 @@ async runtime and **no `unsafe` code** anywhere in the workspace
 | `acp-diverge` | LCS alignment of two trace step sequences (`(direction, hash)` tuples), unified-diff and Graphviz DOT renderers. |
 | `acp-cli` | One binary, `acp`, with `record / replay / emit / inspect / diff` subcommands. A second binary, `acp-echo-agent`, is a tiny but fully ACP-compliant agent used as a test fixture. |
 
+The five library crates (`acp-wire`, `acp-trace`, `acp-proxy`,
+`acp-replay`, `acp-diverge`) are all `pub`-shaped and meant to be
+embedded — the CLI is just one consumer. Editor plugins or test
+harnesses can pull in `acp-trace` + `acp-replay` directly and drive
+replay in-process without spawning the `acp` binary.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for a full walkthrough
+with diagrams of the record and replay data flows.
+
 ---
 
 ## Quick start
@@ -56,6 +65,15 @@ Record any ACP agent (here, the bundled echo agent):
 
 ```sh
 ./target/release/acp record --trace ./session \
+    -- ./target/release/acp-echo-agent < client-stream.jsonl > recorded.jsonl
+```
+
+Optionally pin host context into the manifest — host metadata is always
+recorded, env vars only when you ask for them by name:
+
+```sh
+./target/release/acp record --trace ./session \
+    --capture-env PATH --capture-env LANG --capture-env RUST_LOG \
     -- ./target/release/acp-echo-agent < client-stream.jsonl > recorded.jsonl
 ```
 
@@ -78,6 +96,12 @@ Diff two recordings:
 ./target/release/acp diff ./session-a ./session-b
 ./target/release/acp diff ./session-a ./session-b --dot | dot -Tsvg > div.svg
 ```
+
+A runnable five-frame example with a committed `expected-output.jsonl`
+lives in [`examples/hello-session/`](examples/hello-session/README.md).
+It reproduces the byte-exact record/replay property, the
+key-permutation property, and the divergence-detection property in
+three shell commands.
 
 ---
 
@@ -135,6 +159,42 @@ The bundled `acp-echo-agent` is itself deterministic (no time, no
 randomness, sessionIds derived from request count) so the E2E test
 suite asserts byte-equality of recorded and replayed outputs directly.
 
+## Limitations
+
+This is a recorder, not a sandbox — replay fidelity inherits everything
+the agent depends on. Be aware of the following:
+
+* **The agent must be deterministic.** If the agent embeds wall-clock
+  time, randomness, model temperature > 0, or `pid`/`HOSTNAME` in any
+  response, two recordings of the "same" session will not match and
+  replay against a re-run client will diverge. For LLM-backed agents,
+  pin model version and set `temperature=0`.
+* **Strict JSON-RPC id matching.** The replay engine matches client
+  frames by canonical hash of the *whole* envelope, which includes
+  `"id"`. If a recorded session used ids `1,2,3,…` and your live client
+  re-numbers them `1000,1001,…`, replay will report a divergence on the
+  first frame. Re-numbering / id-remapping is not currently supported.
+* **Environment is not implicitly captured.** Out of the box the
+  manifest stores only `agent_argv`, plus host metadata (os/arch/cwd/
+  pid) and any env vars you explicitly opt in via
+  `acp record --capture-env KEY ...`. This is deliberate: a blanket
+  `std::env::vars()` snapshot would routinely leak `*_API_KEY`,
+  `*_TOKEN` and similar secrets into a file users may share.
+* **Wall-clock timestamps in `events.jsonl`.** Each event records
+  `t_wall_ns` for human inspection. This means two recordings of the
+  same session produce non-identical `events.jsonl` files. It does
+  **not** affect byte-exact replay (a2c bytes come from the blob store,
+  not the event log), but if you need bit-identical recordings — e.g.
+  for golden-file tests — strip / zero the field before comparing.
+* **Stderr is forwarded but not recorded.** Per the ACP spec stderr
+  carries no protocol traffic; the proxy tees it to the parent unchanged
+  but does not persist it. If you need stderr for debugging, redirect
+  it yourself.
+* **CRLF tolerance is one-way.** The reader accepts CRLF for
+  Windows-clipboard-pasted inputs, but the writer always emits LF. ACP
+  itself mandates LF; CRLF in recorded blobs would break replay byte
+  equality.
+
 ---
 
 ## Measured performance
@@ -161,8 +221,9 @@ hashing, disk I/O for events.jsonl + blob CAS, and stdio pipe overhead.
 
 ```
 $ cargo test --workspace
-test result: ok. 14 passed; 0 failed; …   (acp-wire)
-test result: ok.  2 passed; 0 failed; …   (acp-trace)
+test result: ok. 14 passed; 0 failed; …   (acp-wire unit tests)
+test result: ok.  4 passed; 0 failed; …   (acp-wire JCS property tests, 200 trials each)
+test result: ok.  5 passed; 0 failed; …   (acp-trace)
 test result: ok.  1 passed; 0 failed; …   (acp-proxy)
 test result: ok.  4 passed; 0 failed; …   (acp-replay)
 test result: ok.  2 passed; 0 failed; …   (acp-diverge)
