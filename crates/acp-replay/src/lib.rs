@@ -15,6 +15,51 @@
 //! "Byte-exact" here means: every byte written to the output corresponds
 //! to a byte that was originally observed on the wire during recording.
 //! The trailing `\n` framing is reproduced by [`acp_wire::write_frame`].
+//!
+//! # Embedding the replay engine
+//!
+//! The crate is intended to be driven in-process from tests or editor
+//! plugins, without going through the `acp` binary. The following
+//! example records a tiny session and then replays it back, asserting
+//! that the replay output matches what was recorded:
+//!
+//! ```
+//! use std::io::Cursor;
+//!
+//! use acp_trace::{Direction, FixedClock, Manifest, TraceReader, TraceWriter};
+//! use acp_wire::Frame;
+//! use acp_replay::{replay_interactive, replay_offline};
+//!
+//! // Build a two-frame trace synthetically.
+//! let dir = std::env::temp_dir().join(format!(
+//!     "acp-replay-doctest-{}",
+//!     std::time::SystemTime::now()
+//!         .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+//! ));
+//! let clock = Box::new(FixedClock::epoch());
+//! let manifest = Manifest::new_with_clock("doctest", vec!["agent".into()], clock.as_ref());
+//! let mut w = TraceWriter::create_with_clock(&dir, manifest, clock).unwrap();
+//! let req = Frame::parse(br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#).unwrap();
+//! let res = Frame::parse(br#"{"jsonrpc":"2.0","id":1,"result":{"pong":true}}"#).unwrap();
+//! w.record(Direction::C2a, &req).unwrap();
+//! w.record(Direction::A2c, &res).unwrap();
+//! w.finalize().unwrap();
+//!
+//! // Replay it interactively against the same client stream.
+//! let trace = TraceReader::open(&dir).unwrap();
+//! let client_stream = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+//! let mut out = Vec::new();
+//! let n = replay_interactive(&trace, Cursor::new(&client_stream[..]), &mut out).unwrap();
+//! assert_eq!(n, 1);
+//! assert!(out.starts_with(br#"{"jsonrpc":"2.0","id":1,"result":{"pong":true}}"#));
+//!
+//! // Or just emit all recorded a2c bytes in order.
+//! let mut offline = Vec::new();
+//! replay_offline(&trace, &mut offline).unwrap();
+//! assert_eq!(offline, out);
+//!
+//! # std::fs::remove_dir_all(&dir).ok();
+//! ```
 
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]

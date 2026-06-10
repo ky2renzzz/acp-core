@@ -154,6 +154,20 @@ impl Frame {
 }
 
 /// blake3 over the RFC 8785 canonical form of `v`.
+///
+/// Two `serde_json::Value`s that differ only in object-key ordering
+/// hash to the same bytes. This is the cornerstone of the project: it
+/// lets recorded sessions tolerate clients that re-emit logically
+/// equal JSON-RPC frames with permuted keys.
+///
+/// ```
+/// use acp_wire::payload_hash;
+/// use serde_json::json;
+///
+/// let a = payload_hash(&json!({"jsonrpc":"2.0","id":1,"method":"x","params":{"a":1,"b":2}}));
+/// let b = payload_hash(&json!({"params":{"b":2,"a":1},"method":"x","id":1,"jsonrpc":"2.0"}));
+/// assert_eq!(a, b);
+/// ```
 pub fn payload_hash(v: &Value) -> [u8; 32] {
     let bytes = canonicalize(v);
     *blake3::hash(&bytes).as_bytes()

@@ -230,11 +230,12 @@ hashing, disk I/O for events.jsonl + blob CAS, and stdio pipe overhead.
 $ cargo test --workspace
 test result: ok. 14 passed; 0 failed; …   (acp-wire unit tests)
 test result: ok.  4 passed; 0 failed; …   (acp-wire JCS property tests, 200 trials each)
-test result: ok.  5 passed; 0 failed; …   (acp-trace)
+test result: ok.  7 passed; 0 failed; …   (acp-trace, incl. FixedClock golden tests)
 test result: ok.  1 passed; 0 failed; …   (acp-proxy)
-test result: ok.  4 passed; 0 failed; …   (acp-replay)
+test result: ok.  7 passed; 0 failed; …   (acp-replay, incl. --remap-ids tests)
 test result: ok.  2 passed; 0 failed; …   (acp-diverge)
 test result: ok.  5 passed; 0 failed; …   (acp-cli e2e: real subprocess)
+        Doc-tests — 2 passed                  (acp-wire, acp-replay)
 ```
 
 The E2E tests spawn the actual `acp` and `acp-echo-agent` binaries,
