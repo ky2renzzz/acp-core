@@ -15,3 +15,8 @@ Thumbs.db
 
 # OnlySq agent artefacts (local only)
 /.onlysq/
+
+# Generated example artefacts (reproduce-on-demand, not committed)
+/examples/*/trace/
+/examples/*/got-*.jsonl
+

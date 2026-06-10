@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}
+{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"kind":"agent_message_chunk","content":{"type":"text","text":"echo #1"}}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"kind":"agent_message_chunk","content":{"type":"text","text":"echo #2"}}}}
+{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}
+{"jsonrpc":"2.0","id":5,"result":null}
