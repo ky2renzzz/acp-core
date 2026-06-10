@@ -1,5 +1,9 @@
 # acp-core
 
+[![CI](https://github.com/ky2renzzz/acp-core/actions/workflows/ci.yml/badge.svg)](https://github.com/ky2renzzz/acp-core/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](Cargo.toml)
+
 Minimal-dependency Rust implementation of the [Agent Client Protocol][acp]
 (ACP) wire format plus a **byte-exact deterministic replay engine** for
 recorded agent sessions.
