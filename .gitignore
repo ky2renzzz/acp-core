@@ -20,3 +20,7 @@ Thumbs.db
 /examples/*/trace/
 /examples/*/got-*.jsonl
 
+# Fuzz artefacts
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/

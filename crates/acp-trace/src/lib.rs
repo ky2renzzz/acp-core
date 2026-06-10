@@ -325,6 +325,19 @@ impl Clock for FixedClock {
 /// 2. The frame's raw bytes are written to `blobs/<aa>/<rest>` keyed by
 ///    canonical hash. Duplicate hashes are written once (file is created
 ///    only if absent), which dedups identical prompts across subagents.
+///
+/// # Durability vs. throughput trade-off
+///
+/// Each `record()` call flushes `events.jsonl` to disk. This ensures that
+/// a crashed recording is still inspectable (all events up to the crash are
+/// persisted), but it incurs a syscall per frame.
+///
+/// For typical ACP sessions (hundreds to low thousands of frames), this is
+/// not a bottleneck. If you need maximum throughput for very large traces,
+/// consider buffering frames in memory and calling `record()` in batches,
+/// or wrapping the writer in your own buffering layer.
+///
+/// The choice here prioritizes **crash safety** over raw throughput.
 pub struct TraceWriter {
     root: PathBuf,
     blobs: PathBuf,

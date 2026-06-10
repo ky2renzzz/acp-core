@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "JSON-RPC 2.0 wire format for the Agent Client Protocol (ACP): newline-delimited framing, message classification, canonical JSON (RFC 8785 JCS), blake3 hashing."
+readme = "README.md"
+keywords = ["acp", "json-rpc", "canonical-json", "jcs", "agent"]
+categories = ["encoding", "parsing", "development-tools"]
 
 [dependencies]
 serde       = { workspace = true }

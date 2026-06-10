@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "On-disk trace format for ACP sessions: append-only JSONL log + content-addressed blob store keyed by blake3, with a manifest describing the recorded process."
+readme = "README.md"
+keywords = ["acp", "trace", "content-addressed", "replay", "agent"]
+categories = ["development-tools::debugging", "filesystem"]
 
 [dependencies]
 acp-wire    = { workspace = true }

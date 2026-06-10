@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Deterministic replay engine for recorded ACP sessions. Acts as an agent stub against a real ACP client, or emits the recorded a2c stream offline."
+readme = "README.md"
+keywords = ["acp", "replay", "deterministic", "testing", "agent"]
+categories = ["development-tools::testing", "simulation"]
 
 [dependencies]
 acp-wire   = { workspace = true }

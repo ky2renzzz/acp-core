@@ -1,0 +1,27 @@
+[package]
+name = "acp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+acp-wire = { path = "../crates/acp-wire" }
+serde_json = "1"
+
+[[bin]]
+name = "fuzz_frame_parse"
+path = "fuzz_targets/fuzz_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonicalize"
+path = "fuzz_targets/fuzz_canonicalize.rs"
+test = false
+doc = false
+bench = false

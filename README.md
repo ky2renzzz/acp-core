@@ -342,6 +342,15 @@ exchange a full ACP session (`initialize` → `session/new` →
 
 `cargo clippy --workspace --all-targets -- -D warnings` passes clean.
 
+### Fuzz testing
+
+The `fuzz/` directory contains [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets for `Frame::parse` and `canonicalize`:
+
+```sh
+cargo +nightly fuzz run fuzz_frame_parse
+cargo +nightly fuzz run fuzz_canonicalize
+```
+
 ---
 
 ## Why this exists

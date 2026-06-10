@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Command-line front-end for acp-core: record, replay, diverge, inspect."
+readme = "README.md"
+keywords = ["acp", "cli", "record", "replay", "agent"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "acp"

@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Divergence analysis for parallel ACP subagent traces: LCS alignment by canonical hash, unified diff, DOT graph export."
+readme = "README.md"
+keywords = ["acp", "diff", "divergence", "lcs", "agent"]
+categories = ["development-tools::debugging", "algorithms"]
 
 [dependencies]
 acp-trace = { workspace = true }

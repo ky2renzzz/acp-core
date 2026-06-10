@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Transparent ACP recording proxy: spawns an ACP agent as a child process and tees the newline-delimited JSON-RPC traffic to a trace directory."
+readme = "README.md"
+keywords = ["acp", "proxy", "recording", "stdio", "agent"]
+categories = ["development-tools::debugging", "development-tools::testing"]
 
 [dependencies]
 acp-wire   = { workspace = true }
