@@ -1,0 +1,17 @@
+[package]
+name = "acp-trace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "On-disk trace format for ACP sessions: append-only JSONL log + content-addressed blob store keyed by blake3, with a manifest describing the recorded process."
+
+[dependencies]
+acp-wire    = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+blake3      = { workspace = true }
+thiserror   = { workspace = true }
+time        = { workspace = true }

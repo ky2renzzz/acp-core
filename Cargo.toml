@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/acp-wire",
+    "crates/acp-trace",
+    "crates/acp-proxy",
+    "crates/acp-replay",
+    "crates/acp-diverge",
+    "crates/acp-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/ky2renzzz/acp-core"
+authors = ["ky2renzzz <ky2renzzz@users.noreply.github.com>"]
+
+[workspace.dependencies]
+serde       = { version = "1", features = ["derive"] }
+serde_json  = { version = "1", features = ["preserve_order", "raw_value"] }
+blake3      = "1.5"
+anyhow      = "1"
+thiserror   = "1"
+clap        = { version = "4", features = ["derive"] }
+time        = { version = "0.3", features = ["formatting", "macros", "serde", "serde-well-known"] }
+
+acp-wire    = { path = "crates/acp-wire" }
+acp-trace   = { path = "crates/acp-trace" }
+acp-proxy   = { path = "crates/acp-proxy" }
+acp-replay  = { path = "crates/acp-replay" }
+acp-diverge = { path = "crates/acp-diverge" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

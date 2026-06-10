@@ -1,0 +1,14 @@
+[package]
+name = "acp-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Transparent ACP recording proxy: spawns an ACP agent as a child process and tees the newline-delimited JSON-RPC traffic to a trace directory."
+
+[dependencies]
+acp-wire   = { workspace = true }
+acp-trace  = { workspace = true }
+thiserror  = { workspace = true }

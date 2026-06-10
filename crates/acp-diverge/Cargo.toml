@@ -1,0 +1,16 @@
+[package]
+name = "acp-diverge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Divergence analysis for parallel ACP subagent traces: LCS alignment by canonical hash, unified diff, DOT graph export."
+
+[dependencies]
+acp-trace = { workspace = true }
+serde     = { workspace = true }
+
+[dev-dependencies]
+acp-wire = { workspace = true }

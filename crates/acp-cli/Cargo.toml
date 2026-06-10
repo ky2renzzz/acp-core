@@ -1,0 +1,27 @@
+[package]
+name = "acp-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line front-end for acp-core: record, replay, diverge, inspect."
+
+[[bin]]
+name = "acp"
+path = "src/main.rs"
+
+[[bin]]
+name = "acp-echo-agent"
+path = "src/bin/echo_agent.rs"
+
+[dependencies]
+acp-wire    = { workspace = true }
+acp-trace   = { workspace = true }
+acp-proxy   = { workspace = true }
+acp-replay  = { workspace = true }
+acp-diverge = { workspace = true }
+clap        = { workspace = true }
+anyhow      = { workspace = true }
+serde_json  = { workspace = true }

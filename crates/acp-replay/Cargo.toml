@@ -1,0 +1,15 @@
+[package]
+name = "acp-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Deterministic replay engine for recorded ACP sessions. Acts as an agent stub against a real ACP client, or emits the recorded a2c stream offline."
+
+[dependencies]
+acp-wire   = { workspace = true }
+acp-trace  = { workspace = true }
+thiserror  = { workspace = true }
+serde_json = { workspace = true }
