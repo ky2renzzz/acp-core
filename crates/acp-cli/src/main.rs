@@ -42,6 +42,11 @@ enum Cmd {
         /// Where to write the trace.
         #[arg(long)]
         trace: PathBuf,
+        /// Capture this environment variable into the manifest. May be
+        /// repeated. Only explicitly listed keys are stored — secrets
+        /// (`*_API_KEY`, tokens, ...) stay out unless you opt them in.
+        #[arg(long = "capture-env", value_name = "KEY")]
+        capture_env: Vec<String>,
         /// Agent argv (executable followed by args). Use `--` to separate.
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         agent: Vec<OsString>,
@@ -87,7 +92,11 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Record { trace, agent } => cmd_record(trace, agent),
+        Cmd::Record {
+            trace,
+            capture_env,
+            agent,
+        } => cmd_record(trace, capture_env, agent),
         Cmd::Replay { trace } => cmd_replay(trace),
         Cmd::Emit { trace } => cmd_emit(trace),
         Cmd::Inspect { trace, full } => cmd_inspect(trace, full),
@@ -95,7 +104,11 @@ fn run() -> Result<ExitCode> {
     }
 }
 
-fn cmd_record(trace_dir: PathBuf, agent: Vec<OsString>) -> Result<ExitCode> {
+fn cmd_record(
+    trace_dir: PathBuf,
+    capture_env: Vec<String>,
+    agent: Vec<OsString>,
+) -> Result<ExitCode> {
     if agent.is_empty() {
         bail!("agent argv is empty");
     }
@@ -103,6 +116,7 @@ fn cmd_record(trace_dir: PathBuf, agent: Vec<OsString>) -> Result<ExitCode> {
         agent_argv: agent,
         trace_dir: trace_dir.clone(),
         recorder_version: VERSION.into(),
+        env_whitelist: capture_env,
     };
     let code = acp_proxy::run(cfg, io::stdin(), io::stdout(), io::stderr())
         .with_context(|| format!("recording to {}", trace_dir.display()))?;
@@ -151,6 +165,25 @@ fn cmd_inspect(trace_dir: PathBuf, full: bool) -> Result<ExitCode> {
             .clone()
             .unwrap_or_else(|| "<unfinished>".into())
     );
+    if let Some(env) = &m.recording_env {
+        println!(
+            "host            : {} / {}",
+            env.host_os.as_deref().unwrap_or("?"),
+            env.host_arch.as_deref().unwrap_or("?")
+        );
+        if let Some(cwd) = &env.cwd {
+            println!("cwd             : {cwd}");
+        }
+        if let Some(pid) = env.recorder_pid {
+            println!("recorder_pid    : {pid}");
+        }
+        if !env.env.is_empty() {
+            println!("captured env    : {} key(s)", env.env.len());
+            for (k, v) in &env.env {
+                println!("  {k} = {v}");
+            }
+        }
+    }
 
     let (c2a, a2c) = count_dirs(&reader);
     println!("c2a frames      : {c2a}");

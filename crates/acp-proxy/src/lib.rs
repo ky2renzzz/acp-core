@@ -22,7 +22,7 @@ use std::thread;
 
 use thiserror::Error;
 
-use acp_trace::{Direction, Manifest, TraceWriter};
+use acp_trace::{Direction, Manifest, RecordingEnv, TraceWriter};
 use acp_wire::{FrameReader, WireError};
 
 #[derive(Debug, Error)]
@@ -48,6 +48,22 @@ pub struct ProxyConfig {
     pub agent_argv: Vec<OsString>,
     pub trace_dir: std::path::PathBuf,
     pub recorder_version: String,
+    /// Names of environment variables to copy into the manifest's
+    /// [`RecordingEnv`]. Empty = capture only host metadata (cwd / os /
+    /// arch / pid) and no env vars. Use this allowlist deliberately:
+    /// raw env capture would routinely leak `*_API_KEY` etc.
+    pub env_whitelist: Vec<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        ProxyConfig {
+            agent_argv: Vec::new(),
+            trace_dir: std::path::PathBuf::new(),
+            recorder_version: String::new(),
+            env_whitelist: Vec::new(),
+        }
+    }
 }
 
 /// Run the proxy until the agent exits or the parent stdin closes.
@@ -77,7 +93,9 @@ where
         .iter()
         .map(|s| s.to_string_lossy().into_owned())
         .collect();
-    let manifest = Manifest::new(&cfg.recorder_version, manifest_argv);
+    let env_keys: Vec<&str> = cfg.env_whitelist.iter().map(String::as_str).collect();
+    let manifest = Manifest::new(&cfg.recorder_version, manifest_argv)
+        .with_recording_env(RecordingEnv::capture(&env_keys));
     let writer = TraceWriter::create(&cfg.trace_dir, manifest)?;
     let writer = Arc::new(Mutex::new(Some(writer)));
 
@@ -173,6 +191,7 @@ mod tests {
             agent_argv: vec![],
             trace_dir: std::env::temp_dir().join("acp-proxy-empty"),
             recorder_version: "0.1.0".into(),
+            env_whitelist: Vec::new(),
         };
         let r = run(cfg, io::empty(), io::sink(), io::sink());
         assert!(matches!(r, Err(ProxyError::EmptyArgv)));

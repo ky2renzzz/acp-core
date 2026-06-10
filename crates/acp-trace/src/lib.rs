@@ -129,6 +129,57 @@ pub struct EventRecord {
     pub bytes: u64,
 }
 
+/// Host / process context captured at recording time.
+///
+/// Persisted under `Manifest::recording_env`. Everything is optional so a
+/// recorder MAY omit it (e.g. for redacted public traces), and so traces
+/// produced by older builds keep deserializing cleanly. Environment
+/// variables are only included by an explicit caller-supplied whitelist:
+/// raw `std::env::vars()` would routinely leak `*_API_KEY`, `*_TOKEN`,
+/// `AWS_SECRET_*` and similar credentials into a file the user may share.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordingEnv {
+    /// Working directory of the agent process at spawn time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// `std::env::consts::OS` of the recording host (e.g. `"linux"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_os: Option<String>,
+    /// `std::env::consts::ARCH` of the recording host (e.g. `"x86_64"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_arch: Option<String>,
+    /// OS process id of the recorder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder_pid: Option<u32>,
+    /// Whitelisted environment variables passed to the agent. Keys not
+    /// supplied in the whitelist are NOT captured — secrets stay out.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+impl RecordingEnv {
+    /// Capture host metadata and the listed env vars from the current process.
+    /// Missing vars are silently skipped. Pass an empty slice to capture no
+    /// env at all (host metadata still populated).
+    pub fn capture(env_whitelist: &[&str]) -> Self {
+        let mut env = std::collections::BTreeMap::new();
+        for key in env_whitelist {
+            if let Ok(v) = std::env::var(key) {
+                env.insert((*key).to_string(), v);
+            }
+        }
+        RecordingEnv {
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned()),
+            host_os: Some(std::env::consts::OS.to_string()),
+            host_arch: Some(std::env::consts::ARCH.to_string()),
+            recorder_pid: Some(std::process::id()),
+            env,
+        }
+    }
+}
+
 /// Top-level recording metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -139,14 +190,19 @@ pub struct Manifest {
     /// RFC 3339 timestamp.
     pub started_at: String,
     /// RFC 3339 timestamp, populated by [`TraceWriter::finalize`].
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
     /// Number of events at finalize time.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_count: Option<u64>,
     /// blake3 of `events.jsonl` after finalization, hex with `blake3:` prefix.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events_hash: Option<String>,
+    /// Host & process context at record time. See [`RecordingEnv`].
+    /// `None` for older traces; produced by recorders that called
+    /// [`Manifest::with_recording_env`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_env: Option<RecordingEnv>,
 }
 
 impl Manifest {
@@ -160,7 +216,14 @@ impl Manifest {
             ended_at: None,
             event_count: None,
             events_hash: None,
+            recording_env: None,
         }
+    }
+
+    /// Attach a captured environment snapshot to this manifest.
+    pub fn with_recording_env(mut self, env: RecordingEnv) -> Self {
+        self.recording_env = Some(env);
+        self
     }
 }
 
@@ -461,6 +524,73 @@ mod tests {
         let b1 = r.load_blob(&r.events[0]).unwrap();
         let b2 = r.load_blob(&r.events[1]).unwrap();
         assert_eq!(b1, b2);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn manifest_without_recording_env_is_readable() {
+        // Old recorders never wrote `recording_env`. New readers must accept
+        // a manifest where the field is missing, defaulting it to `None`.
+        let legacy = r#"{
+            "format_version": 1,
+            "recorder": "acp-core",
+            "recorder_version": "0.0.1",
+            "agent_argv": ["legacy-agent"],
+            "started_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let m: Manifest = serde_json::from_str(legacy).expect("forward-compat parse");
+        assert!(m.recording_env.is_none());
+        assert!(m.ended_at.is_none());
+    }
+
+    #[test]
+    fn recording_env_captures_host_and_whitelisted_vars() {
+        // SAFETY: cargo runs tests in parallel by default, but each test
+        // owns a unique env-var name so there is no cross-test interference.
+        std::env::set_var("ACP_TEST_SECRET", "should-not-leak");
+        std::env::set_var("ACP_TEST_PUBLIC", "captured-ok");
+
+        let env = RecordingEnv::capture(&["ACP_TEST_PUBLIC", "ACP_TEST_MISSING"]);
+        assert_eq!(env.host_os.as_deref(), Some(std::env::consts::OS));
+        assert_eq!(env.host_arch.as_deref(), Some(std::env::consts::ARCH));
+        assert!(env.recorder_pid.is_some());
+        assert!(env.cwd.is_some());
+
+        // Whitelist works: present key captured, missing key skipped,
+        // non-whitelisted secret NEVER captured even though it's in env.
+        assert_eq!(
+            env.env.get("ACP_TEST_PUBLIC").map(String::as_str),
+            Some("captured-ok")
+        );
+        assert!(!env.env.contains_key("ACP_TEST_MISSING"));
+        assert!(!env.env.contains_key("ACP_TEST_SECRET"));
+
+        std::env::remove_var("ACP_TEST_SECRET");
+        std::env::remove_var("ACP_TEST_PUBLIC");
+    }
+
+    #[test]
+    fn manifest_with_recording_env_round_trips() {
+        let dir = tmpdir("env-rt");
+        let env = RecordingEnv {
+            cwd: Some("/work".into()),
+            host_os: Some("linux".into()),
+            host_arch: Some("x86_64".into()),
+            recorder_pid: Some(4242),
+            env: [("PATH".to_string(), "/usr/bin".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let manifest = Manifest::new("0.1.0", vec!["agent".into()]).with_recording_env(env);
+        let w = TraceWriter::create(&dir, manifest).unwrap();
+        w.finalize().unwrap();
+
+        let r = TraceReader::open(&dir).unwrap();
+        let got = r.manifest.recording_env.as_ref().expect("env present");
+        assert_eq!(got.cwd.as_deref(), Some("/work"));
+        assert_eq!(got.recorder_pid, Some(4242));
+        assert_eq!(got.env.get("PATH").map(String::as_str), Some("/usr/bin"));
 
         fs::remove_dir_all(&dir).ok();
     }
