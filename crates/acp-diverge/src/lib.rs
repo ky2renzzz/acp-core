@@ -14,7 +14,15 @@
 //!
 //! The implementation is `O(n*m)` time and `O(n*m)` memory in the lengths
 //! of the two step sequences. For session sizes ACP agents realistically
-//! produce (thousands of frames at most), this is well below a second.
+//! produce (single-digit thousands of frames at most), this is well below
+//! a second — a 5 000-step diff completes in under a second on a laptop.
+//!
+//! Concretely, memory cost is `(n+1)·(m+1)·4` bytes. Two 10 000-step
+//! traces compare in ~400 MB and a few seconds; two 100 000-step traces
+//! would want ~40 GiB and are out of scope here. If you ever need to
+//! compare traces in that range, swap in a Myers- or Hunt–McIlroy-style
+//! diff — the [`DiffReport`] data shape is independent of how it was
+//! produced.
 
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]
@@ -65,12 +73,17 @@ pub struct DiffStats {
     pub first_divergence: Option<usize>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-struct Step<'a> {
-    dir: Direction,
-    hash: &'a str,
-    method: Option<&'a str>,
-    seq: u64,
+/// One element of a step sequence fed to [`diff_steps`].
+///
+/// `dir` + `hash` together determine equality during alignment; `method`
+/// and `seq` are carried through into the resulting [`DiffOp`] for
+/// human-readable output but do not influence matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step<'a> {
+    pub dir: Direction,
+    pub hash: &'a str,
+    pub method: Option<&'a str>,
+    pub seq: u64,
 }
 
 fn steps(trace: &TraceReader) -> Vec<Step<'_>> {
@@ -86,31 +99,39 @@ fn steps(trace: &TraceReader) -> Vec<Step<'_>> {
         .collect()
 }
 
-/// Compare two traces. The labels are used in the resulting [`DiffReport`].
-pub fn diff_two(a: &TraceReader, label_a: &str, b: &TraceReader, label_b: &str) -> DiffReport {
-    let sa = steps(a);
-    let sb = steps(b);
-    let ops = lcs_diff(&sa, &sb);
-
+/// Align two step sequences and return the resulting [`DiffOp`]s plus stats.
+///
+/// This is the lower-level entrypoint used by [`diff_two`]; expose it for
+/// embedders that build [`Step`] vectors from sources other than
+/// [`TraceReader`] (e.g. tests, in-memory recordings, synthetic data).
+pub fn diff_steps(a: &[Step<'_>], b: &[Step<'_>]) -> (Vec<DiffOp>, DiffStats) {
+    let ops = lcs_diff(a, b);
     let mut stats = DiffStats::default();
     for (i, op) in ops.iter().enumerate() {
         match op {
             DiffOp::Common { .. } => stats.common += 1,
             DiffOp::OnlyA { .. } => {
+                stats.only_a += 1;
                 if stats.first_divergence.is_none() {
                     stats.first_divergence = Some(i);
                 }
-                stats.only_a += 1;
             }
             DiffOp::OnlyB { .. } => {
+                stats.only_b += 1;
                 if stats.first_divergence.is_none() {
                     stats.first_divergence = Some(i);
                 }
-                stats.only_b += 1;
             }
         }
     }
+    (ops, stats)
+}
 
+/// Compare two traces. The labels are used in the resulting [`DiffReport`].
+pub fn diff_two(a: &TraceReader, label_a: &str, b: &TraceReader, label_b: &str) -> DiffReport {
+    let sa = steps(a);
+    let sb = steps(b);
+    let (ops, stats) = diff_steps(&sa, &sb);
     DiffReport {
         label_a: label_a.into(),
         label_b: label_b.into(),
