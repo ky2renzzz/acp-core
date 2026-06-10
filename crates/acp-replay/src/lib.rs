@@ -85,13 +85,54 @@ pub enum ReplayError {
     Json(#[from] serde_json::Error),
     #[error("trace exhausted but client sent another frame (method={method:?})")]
     TraceExhausted { method: Option<String> },
-    #[error("expected next c2a event seq={expected_seq} with hash={expected_hash}, got hash={got_hash} (method={got_method:?})")]
-    Divergence {
-        expected_seq: u64,
-        expected_hash: String,
-        got_hash: String,
-        got_method: Option<String>,
-    },
+    /// The client sent a frame that doesn't match the next recorded `C2a`
+    /// event. All available context about both sides of the mismatch is
+    /// included to make the error self-explanatory: callers do not need
+    /// to re-open the trace to figure out what went wrong.
+    ///
+    /// The payload is boxed so that `Result<T, ReplayError>` stays small
+    /// on the hot path.
+    #[error("{0}")]
+    Divergence(Box<DivergenceDetail>),
+}
+
+/// Diagnostic payload for [`ReplayError::Divergence`].
+#[derive(Debug, Clone)]
+pub struct DivergenceDetail {
+    /// `seq` of the recorded event we were trying to match.
+    pub expected_seq: u64,
+    /// `method` field of the recorded event (`None` for responses).
+    pub expected_method: Option<String>,
+    /// Canonical hash of the recorded event.
+    pub expected_hash: String,
+    /// `method` field of the offending client frame.
+    pub got_method: Option<String>,
+    /// JSON-RPC `id` of the offending client frame, rendered as JSON
+    /// (`1`, `"foo"`, `null`). `None` if the frame had no id.
+    pub got_id: Option<String>,
+    /// Canonical hash of the offending client frame.
+    pub got_hash: String,
+    /// How many client frames had already been accepted before this
+    /// one. Useful when the trace has thousands of frames and the
+    /// user is trying to locate the bad input.
+    pub client_frames_consumed: u64,
+}
+
+impl std::fmt::Display for DivergenceDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "divergence at trace seq={} (client frame #{}): \
+             expected method={:?} hash={}, got method={:?} id={:?} hash={}",
+            self.expected_seq,
+            self.client_frames_consumed,
+            self.expected_method,
+            self.expected_hash,
+            self.got_method,
+            self.got_id,
+            self.got_hash
+        )
+    }
 }
 
 /// Offline replay: write every A2c event to `out` in trace order.
@@ -152,6 +193,7 @@ where
 {
     let mut cursor = 0usize;
     let mut emitted = 0u64;
+    let mut client_frames_consumed: u64 = 0;
     // Maps `recorded_id` -> `client_id` for requests we've matched but
     // not yet responded to. Used only when `opts.remap_ids` is on.
     let mut id_map: HashMap<Id, Id> = HashMap::new();
@@ -174,12 +216,13 @@ where
             let (expected_id, recorded_id_record) = match (&expected.1.id, &incoming.id) {
                 (Some(rec_id), Some(_)) => (record_id_to_wire(rec_id), rec_id.clone()),
                 _ => {
-                    return Err(ReplayError::Divergence {
-                        expected_seq: expected.1.seq,
+                    return Err(divergence(
+                        expected.1,
+                        &incoming,
                         expected_hash,
                         got_hash,
-                        got_method: incoming.method.clone(),
-                    });
+                        client_frames_consumed,
+                    ));
                 }
             };
             let rewritten_hash = hash_with_id(&incoming.value, &expected_id);
@@ -189,26 +232,50 @@ where
                 }
                 cursor = expected.0 + 1;
             } else {
-                return Err(ReplayError::Divergence {
-                    expected_seq: expected.1.seq,
+                return Err(divergence(
+                    expected.1,
+                    &incoming,
                     expected_hash,
                     got_hash,
-                    got_method: incoming.method.clone(),
-                });
+                    client_frames_consumed,
+                ));
             }
         } else {
-            return Err(ReplayError::Divergence {
-                expected_seq: expected.1.seq,
+            return Err(divergence(
+                expected.1,
+                &incoming,
                 expected_hash,
                 got_hash,
-                got_method: incoming.method.clone(),
-            });
+                client_frames_consumed,
+            ));
         }
 
+        client_frames_consumed += 1;
         cursor = emit_a2c_block(trace, cursor, &id_map, opts, &mut client_out, &mut emitted)?;
     }
 
     Ok(emitted)
+}
+
+/// Build a [`ReplayError::Divergence`] populated from a recorded event
+/// and an offending client frame. Centralised so the error format
+/// stays consistent across the three places that can fail.
+fn divergence(
+    expected: &EventRecord,
+    got: &Frame,
+    expected_hash: String,
+    got_hash: String,
+    client_frames_consumed: u64,
+) -> ReplayError {
+    ReplayError::Divergence(Box::new(DivergenceDetail {
+        expected_seq: expected.seq,
+        expected_method: expected.method.clone(),
+        expected_hash,
+        got_method: got.method.clone(),
+        got_id: got.id.as_ref().map(|id| id.to_value().to_string()),
+        got_hash,
+        client_frames_consumed,
+    }))
 }
 
 fn record_id_to_wire(r: &RecordId) -> Id {
@@ -425,7 +492,7 @@ mod tests {
 "#;
         let mut out = Vec::new();
         let err = replay_interactive(&r, Cursor::new(&client_stream[..]), &mut out).unwrap_err();
-        assert!(matches!(err, ReplayError::Divergence { .. }));
+        assert!(matches!(err, ReplayError::Divergence(_)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -528,7 +595,7 @@ mod tests {
         let bad = b"{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{}}\n";
         let mut out = Vec::new();
         let err = replay_interactive(&r, Cursor::new(&bad[..]), &mut out).unwrap_err();
-        assert!(matches!(err, ReplayError::Divergence { .. }));
+        assert!(matches!(err, ReplayError::Divergence(_)));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -558,7 +625,47 @@ mod tests {
             &ReplayOptions { remap_ids: true },
         )
         .unwrap_err();
-        assert!(matches!(err, ReplayError::Divergence { .. }));
+        assert!(matches!(err, ReplayError::Divergence(_)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn divergence_error_carries_full_context() {
+        let dir = tmpdir("div-ctx");
+        build_trace(
+            &dir,
+            &[
+                // Two C2a so we can fail on the SECOND client frame and
+                // verify client_frames_consumed == 1.
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                ),
+                (Direction::A2c, br#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/a"}}"#,
+                ),
+                (Direction::A2c, br#"{"jsonrpc":"2.0","id":2,"result":{}}"#),
+            ],
+        );
+        let r = TraceReader::open(&dir).unwrap();
+        // First frame matches; second has different params -> divergence.
+        let stream = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\
+                       {\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"session/new\",\"params\":{\"cwd\":\"/b\"}}\n";
+        let mut out = Vec::new();
+        let err = replay_interactive(&r, Cursor::new(&stream[..]), &mut out).unwrap_err();
+
+        match err {
+            ReplayError::Divergence(d) => {
+                assert_eq!(d.expected_seq, 2);
+                assert_eq!(d.expected_method.as_deref(), Some("session/new"));
+                assert_eq!(d.got_method.as_deref(), Some("session/new"));
+                assert_eq!(d.got_id.as_deref(), Some("\"abc\""));
+                assert_eq!(d.client_frames_consumed, 1);
+            }
+            other => panic!("expected Divergence, got {other:?}"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }
