@@ -23,7 +23,7 @@ use clap::{Parser, Subcommand};
 
 use acp_diverge::{diff_two, render_dot, render_unified};
 use acp_proxy::ProxyConfig;
-use acp_replay::{replay_interactive, replay_offline};
+use acp_replay::{replay_interactive_with, replay_offline, ReplayOptions};
 use acp_trace::{Clock, FixedClock, SystemClock};
 use acp_trace::{Direction, TraceReader};
 
@@ -69,6 +69,13 @@ enum Cmd {
     Replay {
         /// Path to the trace directory.
         trace: PathBuf,
+        /// Accept client requests whose JSON-RPC `id` differs from the
+        /// recorded one, as long as everything else hashes equal.
+        /// Outbound responses are rewritten with the client's own id.
+        /// Useful when replaying against a client whose id numbering
+        /// scheme differs from the one that produced the recording.
+        #[arg(long = "remap-ids")]
+        remap_ids: bool,
     },
     /// Emit the recorded a2c frames to stdout, in order.
     Emit {
@@ -113,7 +120,7 @@ fn run() -> Result<ExitCode> {
             clock,
             agent,
         } => cmd_record(trace, capture_env, no_recording_env, clock, agent),
-        Cmd::Replay { trace } => cmd_replay(trace),
+        Cmd::Replay { trace, remap_ids } => cmd_replay(trace, remap_ids),
         Cmd::Emit { trace } => cmd_emit(trace),
         Cmd::Inspect { trace, full } => cmd_inspect(trace, full),
         Cmd::Diff { a, b, dot } => cmd_diff(a, b, dot),
@@ -162,12 +169,14 @@ fn parse_clock(spec: &str) -> Result<Box<dyn Clock>> {
     }
 }
 
-fn cmd_replay(trace_dir: PathBuf) -> Result<ExitCode> {
+fn cmd_replay(trace_dir: PathBuf, remap_ids: bool) -> Result<ExitCode> {
     let reader = TraceReader::open(&trace_dir)
         .with_context(|| format!("opening trace {}", trace_dir.display()))?;
     let stdin = BufReader::new(io::stdin());
     let mut stdout = io::stdout();
-    let emitted = replay_interactive(&reader, stdin, &mut stdout).context("interactive replay")?;
+    let opts = ReplayOptions { remap_ids };
+    let emitted = replay_interactive_with(&reader, stdin, &mut stdout, &opts)
+        .context("interactive replay")?;
     eprintln!("acp: replay emitted {emitted} a2c frames");
     Ok(ExitCode::SUCCESS)
 }

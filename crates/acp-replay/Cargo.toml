@@ -13,3 +13,4 @@ acp-wire   = { workspace = true }
 acp-trace  = { workspace = true }
 thiserror  = { workspace = true }
 serde_json = { workspace = true }
+blake3     = { workspace = true }

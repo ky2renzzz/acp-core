@@ -169,11 +169,14 @@ the agent depends on. Be aware of the following:
   response, two recordings of the "same" session will not match and
   replay against a re-run client will diverge. For LLM-backed agents,
   pin model version and set `temperature=0`.
-* **Strict JSON-RPC id matching.** The replay engine matches client
-  frames by canonical hash of the *whole* envelope, which includes
-  `"id"`. If a recorded session used ids `1,2,3,…` and your live client
-  re-numbers them `1000,1001,…`, replay will report a divergence on the
-  first frame. Re-numbering / id-remapping is not currently supported.
+* **JSON-RPC id matching is strict by default.** The replay engine
+  matches client frames by canonical hash of the *whole* envelope,
+  which includes `"id"`. If a recorded session used ids `1,2,3,…` and
+  your live client re-numbers them `1000,1001,…`, default replay will
+  report a divergence on the first frame. Pass `acp replay --remap-ids`
+  to opt in to id rewriting: the engine then matches by canonical hash
+  modulo `id` and rewrites outbound responses so the client sees its
+  own ids back.
 * **Environment is not implicitly captured.** Out of the box the
   manifest stores only `agent_argv`, plus host metadata (os/arch/cwd/
   pid) and any env vars you explicitly opt in via

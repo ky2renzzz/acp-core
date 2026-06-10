@@ -40,6 +40,7 @@ version = "0.1.0"
 dependencies = [
  "acp-trace",
  "acp-wire",
+ "blake3",
  "serde_json",
  "thiserror",
 ]

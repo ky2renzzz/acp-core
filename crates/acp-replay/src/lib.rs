@@ -19,12 +19,14 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms, missing_debug_implementations)]
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
+use serde_json::Value;
 use thiserror::Error;
 
-use acp_trace::{Direction, EventRecord, TraceReader};
-use acp_wire::{Frame, FrameReader};
+use acp_trace::{Direction, EventRecord, RecordId, TraceReader};
+use acp_wire::{canonicalize, Frame, FrameReader, Id, Kind};
 
 #[derive(Debug, Error)]
 pub enum ReplayError {
@@ -34,6 +36,8 @@ pub enum ReplayError {
     Wire(#[from] acp_wire::WireError),
     #[error("trace: {0}")]
     Trace(#[from] acp_trace::TraceError),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("trace exhausted but client sent another frame (method={method:?})")]
     TraceExhausted { method: Option<String> },
     #[error("expected next c2a event seq={expected_seq} with hash={expected_hash}, got hash={got_hash} (method={got_method:?})")]
@@ -61,6 +65,17 @@ pub fn replay_offline<W: Write>(trace: &TraceReader, out: &mut W) -> Result<u64,
     Ok(n)
 }
 
+/// Behaviour knobs for [`replay_interactive_with`].
+#[derive(Debug, Clone, Default)]
+pub struct ReplayOptions {
+    /// If true, accept client requests whose JSON-RPC `id` differs from
+    /// the recorded one as long as everything else hashes to the same
+    /// canonical form. Outbound responses then have their `id` rewritten
+    /// back to the live client's value, so the client sees the answers
+    /// for the ids it sent. Notifications (no `id`) are unaffected.
+    pub remap_ids: bool,
+}
+
 /// Interactive replay: pretend to be the agent against a live client.
 ///
 /// `client_in` is the bytes the client writes (what the original agent
@@ -70,7 +85,21 @@ pub fn replay_offline<W: Write>(trace: &TraceReader, out: &mut W) -> Result<u64,
 pub fn replay_interactive<R, W>(
     trace: &TraceReader,
     client_in: R,
+    client_out: W,
+) -> Result<u64, ReplayError>
+where
+    R: BufRead,
+    W: Write,
+{
+    replay_interactive_with(trace, client_in, client_out, &ReplayOptions::default())
+}
+
+/// Like [`replay_interactive`] but configurable via [`ReplayOptions`].
+pub fn replay_interactive_with<R, W>(
+    trace: &TraceReader,
+    client_in: R,
     mut client_out: W,
+    opts: &ReplayOptions,
 ) -> Result<u64, ReplayError>
 where
     R: BufRead,
@@ -78,17 +107,51 @@ where
 {
     let mut cursor = 0usize;
     let mut emitted = 0u64;
+    // Maps `recorded_id` -> `client_id` for requests we've matched but
+    // not yet responded to. Used only when `opts.remap_ids` is on.
+    let mut id_map: HashMap<Id, Id> = HashMap::new();
 
-    // Emit any leading A2c events the trace begins with (rare but legal —
-    // e.g. agents that send a banner notification before any client input).
-    cursor = emit_until_next_c2a(trace, cursor, &mut client_out, &mut emitted)?;
+    cursor = emit_a2c_block(trace, cursor, &id_map, opts, &mut client_out, &mut emitted)?;
 
     let mut reader = FrameReader::new(client_in);
     while let Some(incoming) = reader.read_frame()? {
         let expected = find_next_c2a(trace, cursor)?;
         let expected_hash = expected.1.hash.clone();
         let got_hash = incoming.payload_hash_str();
-        if got_hash != expected_hash {
+
+        if got_hash == expected_hash {
+            // Fast path: hashes match outright.
+            cursor = expected.0 + 1;
+        } else if opts.remap_ids {
+            // Try to rewrite the incoming id to whatever the trace expected
+            // and see if THAT version hashes equal. If so, remember the
+            // mapping so we can rewrite outbound responses on the way back.
+            let (expected_id, recorded_id_record) = match (&expected.1.id, &incoming.id) {
+                (Some(rec_id), Some(_)) => (record_id_to_wire(rec_id), rec_id.clone()),
+                _ => {
+                    return Err(ReplayError::Divergence {
+                        expected_seq: expected.1.seq,
+                        expected_hash,
+                        got_hash,
+                        got_method: incoming.method.clone(),
+                    });
+                }
+            };
+            let rewritten_hash = hash_with_id(&incoming.value, &expected_id);
+            if rewritten_hash == expected_hash {
+                if let Some(client_id) = incoming.id.clone() {
+                    id_map.insert(record_id_to_wire(&recorded_id_record), client_id);
+                }
+                cursor = expected.0 + 1;
+            } else {
+                return Err(ReplayError::Divergence {
+                    expected_seq: expected.1.seq,
+                    expected_hash,
+                    got_hash,
+                    got_method: incoming.method.clone(),
+                });
+            }
+        } else {
             return Err(ReplayError::Divergence {
                 expected_seq: expected.1.seq,
                 expected_hash,
@@ -96,27 +159,52 @@ where
                 got_method: incoming.method.clone(),
             });
         }
-        // Advance past the matched C2a event.
-        cursor = expected.0 + 1;
-        // Emit all A2c events up to the next C2a event.
-        cursor = emit_until_next_c2a(trace, cursor, &mut client_out, &mut emitted)?;
+
+        cursor = emit_a2c_block(trace, cursor, &id_map, opts, &mut client_out, &mut emitted)?;
     }
 
     Ok(emitted)
 }
 
-fn find_next_c2a(trace: &TraceReader, from: usize) -> Result<(usize, &EventRecord), ReplayError> {
-    for (idx, rec) in trace.events.iter().enumerate().skip(from) {
-        if rec.dir == Direction::C2a {
-            return Ok((idx, rec));
-        }
+fn record_id_to_wire(r: &RecordId) -> Id {
+    match r {
+        RecordId::Num(n) => Id::Num(*n),
+        RecordId::Str(s) => Id::Str(s.clone()),
+        RecordId::Null => Id::Null,
     }
-    Err(ReplayError::TraceExhausted { method: None })
 }
 
-fn emit_until_next_c2a<W: Write>(
+/// Canonical hash of `value` with the top-level `"id"` field replaced.
+fn hash_with_id(value: &Value, new_id: &Id) -> String {
+    let mut clone = value.clone();
+    if let Value::Object(map) = &mut clone {
+        if map.contains_key("id") {
+            map.insert("id".to_string(), new_id.to_value());
+        }
+    }
+    let bytes = canonicalize(&clone);
+    hex_with_prefix(&blake3::hash(&bytes).as_bytes()[..])
+}
+
+fn hex_with_prefix(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(7 + bytes.len() * 2);
+    s.push_str("blake3:");
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+/// Emit every A2c event from `from` up to the next C2a event, rewriting
+/// response ids on the fly when `remap_ids` is enabled. Returns the
+/// new cursor position.
+fn emit_a2c_block<W: Write>(
     trace: &TraceReader,
     from: usize,
+    id_map: &HashMap<Id, Id>,
+    opts: &ReplayOptions,
     out: &mut W,
     emitted: &mut u64,
 ) -> Result<usize, ReplayError> {
@@ -126,12 +214,50 @@ fn emit_until_next_c2a<W: Write>(
         if rec.dir == Direction::C2a {
             break;
         }
-        let bytes = trace.load_blob(rec)?;
-        acp_wire::write_line(out, &bytes)?;
+        if opts.remap_ids && rec.kind == acp_trace::RecordKind::Response {
+            // Response: must remap id back to the client's value.
+            let bytes = trace.load_blob(rec)?;
+            let frame = Frame::parse(&bytes)?;
+            let mapped = if frame.kind == Kind::Response {
+                if let Some(recorded_id) = frame.id.clone() {
+                    if let Some(client_id) = id_map.get(&recorded_id) {
+                        rewrite_id_in_value(&frame.value, client_id)?
+                    } else {
+                        // Unknown id — emit verbatim.
+                        bytes
+                    }
+                } else {
+                    bytes
+                }
+            } else {
+                bytes
+            };
+            acp_wire::write_line(out, &mapped)?;
+        } else {
+            let bytes = trace.load_blob(rec)?;
+            acp_wire::write_line(out, &bytes)?;
+        }
         *emitted += 1;
         idx += 1;
     }
     Ok(idx)
+}
+
+fn rewrite_id_in_value(value: &Value, new_id: &Id) -> Result<Vec<u8>, ReplayError> {
+    let mut clone = value.clone();
+    if let Value::Object(map) = &mut clone {
+        map.insert("id".to_string(), new_id.to_value());
+    }
+    Ok(serde_json::to_vec(&clone)?)
+}
+
+fn find_next_c2a(trace: &TraceReader, from: usize) -> Result<(usize, &EventRecord), ReplayError> {
+    for (idx, rec) in trace.events.iter().enumerate().skip(from) {
+        if rec.dir == Direction::C2a {
+            return Ok((idx, rec));
+        }
+    }
+    Err(ReplayError::TraceExhausted { method: None })
 }
 
 /// Compare two ACP frames the same way the interactive replayer does:
@@ -281,6 +407,113 @@ mod tests {
         let mut out = Vec::new();
         let n = replay_interactive(&r, Cursor::new(&stream[..]), &mut out).unwrap();
         assert_eq!(n, 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remap_ids_accepts_client_with_different_numbering() {
+        // Trace was recorded with ids 1, 2. Live client uses 1000, 1001.
+        // With remap_ids ON, replay accepts the session AND rewrites the
+        // outbound responses so the client sees its own ids back.
+        let dir = tmpdir("remap-ok");
+        build_trace(
+            &dir,
+            &[
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                ),
+                (
+                    Direction::A2c,
+                    br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
+                ),
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#,
+                ),
+                (
+                    Direction::A2c,
+                    br#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+                ),
+            ],
+        );
+        let r = TraceReader::open(&dir).unwrap();
+        let client_stream = b"{\"jsonrpc\":\"2.0\",\"id\":1000,\"method\":\"initialize\",\"params\":{}}\n\
+                              {\"jsonrpc\":\"2.0\",\"id\":1001,\"method\":\"session/new\",\"params\":{}}\n";
+        let mut out = Vec::new();
+        let n = replay_interactive_with(
+            &r,
+            Cursor::new(&client_stream[..]),
+            &mut out,
+            &ReplayOptions { remap_ids: true },
+        )
+        .unwrap();
+        assert_eq!(n, 2);
+        let text = String::from_utf8(out).unwrap();
+        // The client sent 1000 / 1001; responses must carry 1000 / 1001,
+        // not the recorded 1 / 2.
+        assert!(text.contains("\"id\":1000"), "want id 1000 in: {text}");
+        assert!(text.contains("\"id\":1001"), "want id 1001 in: {text}");
+        assert!(
+            !text.contains("\"id\":1,"),
+            "should NOT contain recorded id 1: {text}"
+        );
+        assert!(
+            !text.contains("\"id\":2,"),
+            "should NOT contain recorded id 2: {text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remap_ids_off_still_rejects_renumbered_client() {
+        // Same trace as above, but remap_ids OFF: must diverge on first frame.
+        let dir = tmpdir("remap-off");
+        build_trace(
+            &dir,
+            &[
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                ),
+                (Direction::A2c, br#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+            ],
+        );
+        let r = TraceReader::open(&dir).unwrap();
+        let bad = b"{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"initialize\",\"params\":{}}\n";
+        let mut out = Vec::new();
+        let err = replay_interactive(&r, Cursor::new(&bad[..]), &mut out).unwrap_err();
+        assert!(matches!(err, ReplayError::Divergence { .. }));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remap_ids_rejects_truly_different_payloads() {
+        // Even with remap_ids ON, divergence on non-id fields must still fail.
+        let dir = tmpdir("remap-real-div");
+        build_trace(
+            &dir,
+            &[
+                (
+                    Direction::C2a,
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"v":1}}"#,
+                ),
+                (Direction::A2c, br#"{"jsonrpc":"2.0","id":1,"result":{}}"#),
+            ],
+        );
+        let r = TraceReader::open(&dir).unwrap();
+        // Different `v` in params: remap_ids cannot rescue this.
+        let bad =
+            b"{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"initialize\",\"params\":{\"v\":2}}\n";
+        let mut out = Vec::new();
+        let err = replay_interactive_with(
+            &r,
+            Cursor::new(&bad[..]),
+            &mut out,
+            &ReplayOptions { remap_ids: true },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ReplayError::Divergence { .. }));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
