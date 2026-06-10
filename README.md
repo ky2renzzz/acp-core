@@ -105,6 +105,73 @@ three shell commands.
 
 ---
 
+## Embedding as a library
+
+The CLI is convenience scaffolding. The actual work lives in five
+`pub`-shaped crates and they are meant to be used directly from editor
+plugins, test harnesses, and CI tooling. Common embedding shapes:
+
+```rust,no_run
+// Replay a recorded session in-process against an in-memory client
+// stream. No subprocess, no pipes — just function calls.
+use std::io::Cursor;
+use acp_trace::TraceReader;
+use acp_replay::{replay_interactive_with, ReplayOptions};
+
+let trace = TraceReader::open("./recorded-session")?;
+let client_stream: &[u8] = b"…the JSONL the agent originally received…";
+let mut out = Vec::new();
+
+replay_interactive_with(
+    &trace,
+    Cursor::new(client_stream),
+    &mut out,
+    &ReplayOptions { remap_ids: true },   // tolerate id renumbering
+)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```rust,no_run
+// Record a session from your own test harness without going through
+// the `acp` binary. Useful in `#[test]` functions that drive a real
+// ACP agent and want a trace as a side effect.
+use std::path::PathBuf;
+use acp_proxy::{run, ProxyConfig};
+
+let cfg = ProxyConfig {
+    agent_argv: vec!["./my-agent".into()],
+    trace_dir: PathBuf::from("./trace-test-001"),
+    recorder_version: env!("CARGO_PKG_VERSION").into(),
+    env_whitelist: vec!["PATH".into(), "LANG".into()],
+    skip_recording_env: false,
+    clock: None, // None = system clock; use FixedClock for goldens
+};
+run(cfg, std::io::stdin(), std::io::stdout(), std::io::stderr())?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+```rust,no_run
+// Compare two traces purely as data, without spawning `acp diff`.
+use acp_trace::TraceReader;
+use acp_diverge::diff_two;
+
+let a = TraceReader::open("./run-a")?;
+let b = TraceReader::open("./run-b")?;
+let report = diff_two(&a, "run-a", &b, "run-b");
+if let Some(idx) = report.stats.first_divergence {
+    eprintln!("first divergence at op #{idx}: {:?}", report.ops[idx]);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Every public API used here has either a doc-comment (see `cargo doc
+--workspace --open`) or a runnable doctest. The `acp-replay` crate's
+crate-level doc includes a full end-to-end example: record a synthetic
+trace with `FixedClock`, replay it, assert byte equality — that
+doctest runs as part of `cargo test --workspace`.
+
+---
+
 ## Trace format
 
 A trace directory contains three things:
@@ -152,8 +219,11 @@ deterministically across runs:
 * Client object-key permutations are absorbed: two frames whose JSON
   values are equal in JCS canonical form match the same trace event.
 * Mismatched client requests are reported as
-  `ReplayError::Divergence { expected_hash, got_hash, … }` and the
-  process exits with a non-zero code.
+  `ReplayError::Divergence` carrying a `DivergenceDetail` with both
+  sides of the comparison (recorded `seq` + `method` + hash, offending
+  client `method` + `id` + hash, and how many client frames had been
+  consumed before the failure) and the process exits with a non-zero
+  code.
 
 The bundled `acp-echo-agent` is itself deterministic (no time, no
 randomness, sessionIds derived from request count) so the E2E test
@@ -206,8 +276,15 @@ the agent depends on. Be aware of the following:
 
 ## Measured performance
 
-Numbers from a real run on this workspace
-(`ACP_RUN_BENCH=1 cargo test --release -p acp-cli --test bench`):
+Numbers from real runs on this workspace; two profiles are reported
+because they answer different questions.
+
+### CLI throughput
+
+`ACP_RUN_BENCH=1 cargo test --release -p acp-cli --test bench` —
+includes subprocess spawn, JSON parse/serialise, blake3 hashing, disk
+I/O for `events.jsonl` + blob CAS, AND stdio pipe overhead. This is
+what a shell user sees.
 
 | Workload | Value |
 |---|---:|
@@ -217,10 +294,25 @@ Numbers from a real run on this workspace
 | `acp record` end-to-end wall time   | 4.49 s |
 | `acp replay` end-to-end wall time   | 694 ms |
 | Recorded vs. replayed output        | **byte-identical** |
-| Replay throughput                   | ≈ 4 300 frames/s through the CLI |
+| Replay throughput                   | ≈ 4 300 frames/s |
 
-Both numbers include subprocess spawn, JSON parse/serialise, blake3
-hashing, disk I/O for events.jsonl + blob CAS, and stdio pipe overhead.
+### Library throughput (no subprocess, no pipes)
+
+`ACP_RUN_BENCH=1 cargo test --release -p acp-replay --test library_bench`
+— drives the engine in-process from an in-memory client stream into an
+in-memory output buffer. This is what an editor plugin or test harness
+sees when it embeds the engine.
+
+| Mode | Throughput |
+|---|---:|
+| `replay_interactive` (3006 frames, hash-matched against synthetic client) | ≈ 5 400 frames/s |
+| `replay_offline` (2003 a2c frames, sequential blob load) | ≈ 4 000 frames/s |
+
+The library numbers aren't dramatically higher than the CLI because
+the bottleneck is disk I/O for the per-frame blob loads, not subprocess
+overhead. If you only need the hash sequence (e.g. for divergence
+analysis without re-emitting bytes), iterate `TraceReader::events`
+directly — that is a `Vec` traversal at memory speed.
 
 ---
 

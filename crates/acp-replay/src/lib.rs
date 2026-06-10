@@ -138,6 +138,12 @@ impl std::fmt::Display for DivergenceDetail {
 /// Offline replay: write every A2c event to `out` in trace order.
 ///
 /// Returns the number of frames written.
+///
+/// `out` is written one frame at a time without internal buffering;
+/// when emitting to a file or to stdout, wrap the writer in
+/// [`std::io::BufWriter`] for best throughput. When the destination is
+/// itself a `Vec<u8>` or other in-memory buffer the wrapping is
+/// unnecessary.
 pub fn replay_offline<W: Write>(trace: &TraceReader, out: &mut W) -> Result<u64, ReplayError> {
     let mut n = 0;
     for rec in &trace.events {

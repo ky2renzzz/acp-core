@@ -42,11 +42,19 @@ pub enum ProxyError {
 /// Configuration for a single recording.
 #[derive(Debug)]
 pub struct ProxyConfig {
-    /// Agent executable followed by its arguments. Use `OsString` so that
-    /// Windows-only code units and non-UTF-8 paths survive untouched into
-    /// the child process. The manifest records lossy UTF-8 strings.
+    /// Agent executable followed by its arguments, e.g.
+    /// `["./gemini-cli", "--profile", "acp"]`. `OsString` is used so
+    /// that Windows-only code units and non-UTF-8 paths survive untouched
+    /// into the child process; the manifest records lossy UTF-8 strings
+    /// for human readability.
     pub agent_argv: Vec<OsString>,
+    /// Directory to write the trace to. Will be created if it does not
+    /// exist; an existing non-empty directory will be reused but
+    /// `events.jsonl` is truncated. Make this unique per session.
     pub trace_dir: std::path::PathBuf,
+    /// Free-form string stored in `manifest.recorder_version`. Recorders
+    /// driven by `acp-cli` set this to the crate's `CARGO_PKG_VERSION`;
+    /// embedders may set their own (e.g. an editor plugin version).
     pub recorder_version: String,
     /// Names of environment variables to copy into the manifest's
     /// [`RecordingEnv`]. Empty = capture only host metadata (cwd / os /
