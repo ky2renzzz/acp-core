@@ -26,11 +26,11 @@ thiserror   = "1"
 clap        = { version = "4", features = ["derive"] }
 time        = { version = "0.3", features = ["formatting", "macros", "serde", "serde-well-known"] }
 
-acp-wire    = { path = "crates/acp-wire" }
-acp-trace   = { path = "crates/acp-trace" }
-acp-proxy   = { path = "crates/acp-proxy" }
-acp-replay  = { path = "crates/acp-replay" }
-acp-diverge = { path = "crates/acp-diverge" }
+acp-wire    = { version = "0.1.0", path = "crates/acp-wire" }
+acp-trace   = { version = "0.1.0", path = "crates/acp-trace" }
+acp-proxy   = { version = "0.1.0", path = "crates/acp-proxy" }
+acp-replay  = { version = "0.1.0", path = "crates/acp-replay" }
+acp-diverge = { version = "0.1.0", path = "crates/acp-diverge" }
 
 [profile.release]
 lto = "thin"
