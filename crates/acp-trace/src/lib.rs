@@ -206,13 +206,25 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Create a new manifest using the system clock for `started_at`.
     pub fn new(recorder_version: &str, agent_argv: Vec<String>) -> Self {
+        Self::new_with_clock(recorder_version, agent_argv, &SystemClock)
+    }
+
+    /// Create a new manifest, sourcing the start timestamp from `clock`.
+    /// Use a [`FixedClock`] (or any other [`Clock`] impl) when you need
+    /// bit-identical `events.jsonl` across runs, e.g. for golden tests.
+    pub fn new_with_clock(
+        recorder_version: &str,
+        agent_argv: Vec<String>,
+        clock: &dyn Clock,
+    ) -> Self {
         Manifest {
             format_version: FORMAT_VERSION,
             recorder: "acp-core".into(),
             recorder_version: recorder_version.into(),
             agent_argv,
-            started_at: now_rfc3339(),
+            started_at: clock.rfc3339_now(),
             ended_at: None,
             event_count: None,
             events_hash: None,
@@ -227,19 +239,83 @@ impl Manifest {
     }
 }
 
-fn now_rfc3339() -> String {
-    use time::OffsetDateTime;
-    OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+/// Source of timestamps used while recording.
+///
+/// `acp-trace` calls a `Clock` exactly twice per event (`unix_nanos` for
+/// the event's `t_wall_ns`) plus once for `Manifest::started_at` /
+/// `Manifest::ended_at`. Replacing the system clock with a
+/// [`FixedClock`] makes the produced `manifest.json` and `events.jsonl`
+/// bit-identical across runs — which is exactly what you want when
+/// asserting golden files in tests.
+pub trait Clock: std::fmt::Debug + Send + Sync {
+    /// Wall-clock nanoseconds since the Unix epoch.
+    fn unix_nanos(&self) -> u128;
+    /// RFC 3339 string matching [`Self::unix_nanos`].
+    fn rfc3339_now(&self) -> String;
 }
 
-fn now_unix_nanos() -> u128 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+/// Real-time clock backed by [`std::time::SystemTime`]. This is the
+/// default; you only need to think about clocks when you want
+/// determinism.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn unix_nanos(&self) -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+    fn rfc3339_now(&self) -> String {
+        use time::OffsetDateTime;
+        OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+    }
+}
+
+/// Clock that always returns the same instant. Useful for golden tests
+/// where you want `manifest.json` and `events.jsonl` to be bit-identical
+/// across runs. Construct with [`FixedClock::epoch`] for the Unix epoch
+/// or [`FixedClock::at_nanos`] for a custom point.
+#[derive(Debug, Clone, Copy)]
+pub struct FixedClock {
+    nanos: u128,
+}
+
+impl FixedClock {
+    /// A clock pinned to the Unix epoch (`1970-01-01T00:00:00Z`).
+    pub const fn epoch() -> Self {
+        FixedClock { nanos: 0 }
+    }
+
+    /// A clock pinned to `nanos` nanoseconds since the Unix epoch.
+    pub const fn at_nanos(nanos: u128) -> Self {
+        FixedClock { nanos }
+    }
+}
+
+impl Clock for FixedClock {
+    fn unix_nanos(&self) -> u128 {
+        self.nanos
+    }
+    fn rfc3339_now(&self) -> String {
+        use time::OffsetDateTime;
+        // u128 nanos → seconds + nanos. We saturate at i64::MAX seconds
+        // (well past year 2200) which is far beyond any realistic test.
+        let secs = (self.nanos / 1_000_000_000).min(i64::MAX as u128) as i64;
+        let nanos = (self.nanos % 1_000_000_000) as u32;
+        OffsetDateTime::from_unix_timestamp(secs)
+            .and_then(|t| t.replace_nanosecond(nanos))
+            .ok()
+            .and_then(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+    }
 }
 
 /// Append-only trace writer. Frames are persisted in two places per call to
@@ -249,17 +325,37 @@ fn now_unix_nanos() -> u128 {
 /// 2. The frame's raw bytes are written to `blobs/<aa>/<rest>` keyed by
 ///    canonical hash. Duplicate hashes are written once (file is created
 ///    only if absent), which dedups identical prompts across subagents.
-#[derive(Debug)]
 pub struct TraceWriter {
     root: PathBuf,
     blobs: PathBuf,
     events: BufWriter<File>,
     manifest: Manifest,
     next_seq: u64,
+    clock: Box<dyn Clock>,
+}
+
+impl std::fmt::Debug for TraceWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceWriter")
+            .field("root", &self.root)
+            .field("next_seq", &self.next_seq)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TraceWriter {
+    /// Create a new trace writer using the system clock.
     pub fn create(root: impl Into<PathBuf>, manifest: Manifest) -> Result<Self, TraceError> {
+        Self::create_with_clock(root, manifest, Box::new(SystemClock))
+    }
+
+    /// Create a new trace writer with an injected clock. Pass a
+    /// [`FixedClock`] to make timestamps reproducible.
+    pub fn create_with_clock(
+        root: impl Into<PathBuf>,
+        manifest: Manifest,
+        clock: Box<dyn Clock>,
+    ) -> Result<Self, TraceError> {
         let root = root.into();
         fs::create_dir_all(&root)?;
         let blobs = root.join("blobs");
@@ -283,6 +379,7 @@ impl TraceWriter {
             events,
             manifest,
             next_seq: 0,
+            clock,
         })
     }
 
@@ -317,7 +414,7 @@ impl TraceWriter {
 
         let record = EventRecord {
             seq: self.next_seq,
-            t_wall_ns: now_unix_nanos(),
+            t_wall_ns: self.clock.unix_nanos(),
             dir,
             kind: RecordKind::from(frame.kind),
             method: frame.method.clone(),
@@ -347,7 +444,7 @@ impl TraceWriter {
             format_blake3_hex(blake3::hash(&events_bytes).as_bytes())
         );
 
-        self.manifest.ended_at = Some(now_rfc3339());
+        self.manifest.ended_at = Some(self.clock.rfc3339_now());
         self.manifest.event_count = Some(self.next_seq);
         self.manifest.events_hash = Some(events_hash);
 
@@ -593,5 +690,48 @@ mod tests {
         assert_eq!(got.env.get("PATH").map(String::as_str), Some("/usr/bin"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fixed_clock_yields_bit_identical_traces() {
+        // Same input + same clock => same manifest.json and events.jsonl bytes.
+        fn write_one(dir: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+            let clock = Box::new(FixedClock::at_nanos(1_700_000_000_000_000_000));
+            let manifest =
+                Manifest::new_with_clock("0.1.0-test", vec!["agent".into()], clock.as_ref());
+            let mut w = TraceWriter::create_with_clock(dir, manifest, clock).unwrap();
+            let f1 = Frame::parse(br#"{"jsonrpc":"2.0","id":1,"method":"x","params":{}}"#).unwrap();
+            let f2 = Frame::parse(br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#).unwrap();
+            w.record(Direction::C2a, &f1).unwrap();
+            w.record(Direction::A2c, &f2).unwrap();
+            w.finalize().unwrap();
+            (
+                fs::read(dir.join("manifest.json")).unwrap(),
+                fs::read(dir.join("events.jsonl")).unwrap(),
+            )
+        }
+
+        let a = tmpdir("fixed-a");
+        let b = tmpdir("fixed-b");
+        let (ma, ea) = write_one(&a);
+        let (mb, eb) = write_one(&b);
+
+        assert_eq!(ea, eb, "events.jsonl must be bit-identical with FixedClock");
+        assert_eq!(
+            ma, mb,
+            "manifest.json must be bit-identical with FixedClock"
+        );
+
+        fs::remove_dir_all(&a).ok();
+        fs::remove_dir_all(&b).ok();
+    }
+
+    #[test]
+    fn fixed_clock_rfc3339_matches_expected() {
+        // 2_000_000 ns past the epoch = .002 s.
+        let c = FixedClock::at_nanos(2_000_000);
+        assert_eq!(c.unix_nanos(), 2_000_000);
+        let s = c.rfc3339_now();
+        assert!(s.starts_with("1970-01-01T00:00:00.002"), "got {s:?}");
     }
 }

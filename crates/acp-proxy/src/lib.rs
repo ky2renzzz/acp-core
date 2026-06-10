@@ -22,7 +22,7 @@ use std::thread;
 
 use thiserror::Error;
 
-use acp_trace::{Direction, Manifest, RecordingEnv, TraceWriter};
+use acp_trace::{Clock, Direction, Manifest, RecordingEnv, SystemClock, TraceWriter};
 use acp_wire::{FrameReader, WireError};
 
 #[derive(Debug, Error)]
@@ -40,7 +40,7 @@ pub enum ProxyError {
 }
 
 /// Configuration for a single recording.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ProxyConfig {
     /// Agent executable followed by its arguments. Use `OsString` so that
     /// Windows-only code units and non-UTF-8 paths survive untouched into
@@ -53,6 +53,16 @@ pub struct ProxyConfig {
     /// arch / pid) and no env vars. Use this allowlist deliberately:
     /// raw env capture would routinely leak `*_API_KEY` etc.
     pub env_whitelist: Vec<String>,
+    /// If true, no [`RecordingEnv`] is attached to the manifest at all.
+    /// Combine with a [`acp_trace::FixedClock`] for fully reproducible
+    /// golden traces (pid, cwd and host info would otherwise differ
+    /// between runs).
+    pub skip_recording_env: bool,
+    /// Clock used for the manifest's `started_at`/`ended_at` and every
+    /// event's `t_wall_ns`. `None` = use the system clock. Pass a
+    /// [`acp_trace::FixedClock`] for golden-file tests that need
+    /// bit-identical `manifest.json` / `events.jsonl` across runs.
+    pub clock: Option<Box<dyn Clock>>,
 }
 
 impl Default for ProxyConfig {
@@ -62,6 +72,8 @@ impl Default for ProxyConfig {
             trace_dir: std::path::PathBuf::new(),
             recorder_version: String::new(),
             env_whitelist: Vec::new(),
+            skip_recording_env: false,
+            clock: None,
         }
     }
 }
@@ -94,9 +106,13 @@ where
         .map(|s| s.to_string_lossy().into_owned())
         .collect();
     let env_keys: Vec<&str> = cfg.env_whitelist.iter().map(String::as_str).collect();
-    let manifest = Manifest::new(&cfg.recorder_version, manifest_argv)
-        .with_recording_env(RecordingEnv::capture(&env_keys));
-    let writer = TraceWriter::create(&cfg.trace_dir, manifest)?;
+    let clock: Box<dyn Clock> = cfg.clock.unwrap_or_else(|| Box::new(SystemClock));
+    let mut manifest =
+        Manifest::new_with_clock(&cfg.recorder_version, manifest_argv, clock.as_ref());
+    if !cfg.skip_recording_env {
+        manifest = manifest.with_recording_env(RecordingEnv::capture(&env_keys));
+    }
+    let writer = TraceWriter::create_with_clock(&cfg.trace_dir, manifest, clock)?;
     let writer = Arc::new(Mutex::new(Some(writer)));
 
     let mut cmd = Command::new(&cfg.agent_argv[0]);
@@ -192,6 +208,8 @@ mod tests {
             trace_dir: std::env::temp_dir().join("acp-proxy-empty"),
             recorder_version: "0.1.0".into(),
             env_whitelist: Vec::new(),
+            skip_recording_env: false,
+            clock: None,
         };
         let r = run(cfg, io::empty(), io::sink(), io::sink());
         assert!(matches!(r, Err(ProxyError::EmptyArgv)));

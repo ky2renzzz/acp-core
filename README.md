@@ -181,11 +181,15 @@ the agent depends on. Be aware of the following:
   `std::env::vars()` snapshot would routinely leak `*_API_KEY`,
   `*_TOKEN` and similar secrets into a file users may share.
 * **Wall-clock timestamps in `events.jsonl`.** Each event records
-  `t_wall_ns` for human inspection. This means two recordings of the
-  same session produce non-identical `events.jsonl` files. It does
-  **not** affect byte-exact replay (a2c bytes come from the blob store,
-  not the event log), but if you need bit-identical recordings — e.g.
-  for golden-file tests — strip / zero the field before comparing.
+  `t_wall_ns` for human inspection. By default two recordings of the
+  same session produce non-identical `events.jsonl` files. This does
+  **not** affect byte-exact replay (a2c bytes come from the blob
+  store, not the event log). If you _do_ need bit-identical recordings
+  — e.g. for golden-file tests — pass `--clock epoch` (or
+  `--clock nanos:<N>`) to pin every timestamp, plus
+  `--no-recording-env` to suppress the host/pid snapshot. Two such
+  recordings of the same session are then `cmp`-equal on both
+  `manifest.json` and `events.jsonl`.
 * **Stderr is forwarded but not recorded.** Per the ACP spec stderr
   carries no protocol traffic; the proxy tees it to the parent unchanged
   but does not persist it. If you need stderr for debugging, redirect

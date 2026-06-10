@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
 use acp_diverge::{diff_two, render_dot, render_unified};
 use acp_proxy::ProxyConfig;
 use acp_replay::{replay_interactive, replay_offline};
+use acp_trace::{Clock, FixedClock, SystemClock};
 use acp_trace::{Direction, TraceReader};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -47,6 +48,19 @@ enum Cmd {
         /// (`*_API_KEY`, tokens, ...) stay out unless you opt them in.
         #[arg(long = "capture-env", value_name = "KEY")]
         capture_env: Vec<String>,
+        /// Do not embed any host metadata (cwd / os / arch / pid) in the
+        /// manifest. Combine with `--clock epoch` for fully reproducible
+        /// golden traces.
+        #[arg(long = "no-recording-env")]
+        no_recording_env: bool,
+        /// Clock source for timestamps in `manifest.json` /
+        /// `events.jsonl`. `system` (default) uses real wall-clock time;
+        /// `epoch` pins everything to 1970-01-01T00:00:00Z; `nanos:<N>`
+        /// pins to N nanoseconds since the Unix epoch. The two fixed
+        /// options make the produced files bit-identical across runs —
+        /// useful for golden-file regression tests.
+        #[arg(long = "clock", value_name = "SPEC", default_value = "system")]
+        clock: String,
         /// Agent argv (executable followed by args). Use `--` to separate.
         #[arg(trailing_var_arg = true, required = true, num_args = 1..)]
         agent: Vec<OsString>,
@@ -95,8 +109,10 @@ fn run() -> Result<ExitCode> {
         Cmd::Record {
             trace,
             capture_env,
+            no_recording_env,
+            clock,
             agent,
-        } => cmd_record(trace, capture_env, agent),
+        } => cmd_record(trace, capture_env, no_recording_env, clock, agent),
         Cmd::Replay { trace } => cmd_replay(trace),
         Cmd::Emit { trace } => cmd_emit(trace),
         Cmd::Inspect { trace, full } => cmd_inspect(trace, full),
@@ -107,20 +123,43 @@ fn run() -> Result<ExitCode> {
 fn cmd_record(
     trace_dir: PathBuf,
     capture_env: Vec<String>,
+    no_recording_env: bool,
+    clock_spec: String,
     agent: Vec<OsString>,
 ) -> Result<ExitCode> {
     if agent.is_empty() {
         bail!("agent argv is empty");
     }
+    if no_recording_env && !capture_env.is_empty() {
+        bail!("--no-recording-env and --capture-env are mutually exclusive");
+    }
+    let clock = parse_clock(&clock_spec)?;
     let cfg = ProxyConfig {
         agent_argv: agent,
         trace_dir: trace_dir.clone(),
         recorder_version: VERSION.into(),
         env_whitelist: capture_env,
+        skip_recording_env: no_recording_env,
+        clock: Some(clock),
     };
     let code = acp_proxy::run(cfg, io::stdin(), io::stdout(), io::stderr())
         .with_context(|| format!("recording to {}", trace_dir.display()))?;
     Ok(ExitCode::from(code.clamp(0, 255) as u8))
+}
+
+fn parse_clock(spec: &str) -> Result<Box<dyn Clock>> {
+    if spec == "system" {
+        Ok(Box::new(SystemClock))
+    } else if spec == "epoch" {
+        Ok(Box::new(FixedClock::epoch()))
+    } else if let Some(n) = spec.strip_prefix("nanos:") {
+        let nanos: u128 = n
+            .parse()
+            .with_context(|| format!("--clock nanos:<N>: not a u128: {n:?}"))?;
+        Ok(Box::new(FixedClock::at_nanos(nanos)))
+    } else {
+        bail!("--clock: unknown spec {spec:?}; expected `system`, `epoch`, or `nanos:<N>`")
+    }
 }
 
 fn cmd_replay(trace_dir: PathBuf) -> Result<ExitCode> {
