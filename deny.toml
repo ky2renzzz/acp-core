@@ -1,0 +1,67 @@
+# cargo-deny configuration for acp-core.
+#
+# Run locally with:
+#   cargo install cargo-deny --locked
+#   cargo deny --workspace check
+#
+# CI runs the same command on every push (see .github/workflows/ci.yml).
+
+[graph]
+# Check the resolved graph for every target the project actually supports.
+# We don't currently target any exotic platforms, so the host triple list
+# stays empty — cargo-deny then checks the current host plus the most
+# common tier-1 / tier-2 triples it knows about.
+all-features = false
+no-default-features = false
+
+[advisories]
+# Pull from RustSec — the canonical vulnerability database.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail the build on any active vulnerability or unmaintained crate.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# We're Apache-2.0 ourselves, and we only depend on permissive crates.
+# This list is intentionally explicit: an addition to the dependency tree
+# that drags in a copyleft or unknown license will fail CI and force a
+# conscious review instead of silently being accepted.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.92
+
+[bans]
+# `warn` rather than `deny` for multiple versions — we don't want a tiny
+# transitive bump in `clap`'s helpers to break CI overnight. But we still
+# want to see the warning so we can clean up when convenient.
+multiple-versions = "warn"
+wildcards = "deny"
+# Crates we never want to see in the tree, ever.
+deny = [
+    # `openssl` brings a C dependency and a license footgun; if we ever
+    # need TLS, prefer `rustls`.
+    { name = "openssl" },
+]
+# Skip the multiple-versions check for crates that legitimately get
+# pulled in twice via incompatible semver ranges from upstream — add
+# entries here only after confirming the duplication is unavoidable.
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

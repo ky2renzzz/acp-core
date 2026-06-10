@@ -45,3 +45,14 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: cargo test
         run: cargo test --workspace
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arg: --workspace
+
